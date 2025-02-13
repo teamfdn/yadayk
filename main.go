@@ -6,11 +6,11 @@ import (
 	"log"
 	"os"
 	"runtime"
-	"sync"
 	"time"
 
 	"github.com/jtejido/sourceafis"
 	"github.com/jtejido/sourceafis/config"
+	"github.com/jtejido/sourceafis/templates"
 )
 
 type TransparencyContents struct{}
@@ -31,36 +31,56 @@ func listFiles(dir string) ([]string, error) {
 	}
 
 	var files []string
-	pool := sync.Pool{New: func() any { return new(string) }}
-
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			fileName := pool.Get().(*string)
-			*fileName = entry.Name()
-			files = append(files, *fileName)
-			pool.Put(fileName)
+		path := entry.Name()
+		if entry.IsDir() {
+			subEntries, err := os.ReadDir(path)
+			if err != nil {
+				continue // Skip unreadable directories instead of returning an error
+			}
+			for _, subEntry := range subEntries {
+				if !subEntry.IsDir() {
+					files = append(files, path+"/"+subEntry.Name())
+				}
+			}
+		} else {
+			files = append(files, path)
 		}
 	}
 
 	return files, nil
 }
 
+func preLoadTempls(files []string, tc *sourceafis.TemplateCreator, basePath string) map[string]*templates.SearchTemplate {
+	templCache := make(map[string]*templates.SearchTemplate)
+	for _, file := range files {
+		img, err := sourceafis.LoadImage(basePath + "/" + file)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		templ, err := tc.Template(img)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		templCache[file] = templ
+	}
+	return templCache
+}
+
 func main() {
 	var input string
-	fmt.Print("Masukan directory: ")
-	fmt.Scanln(&input)
-
 	input = "sample-image"
+
 	files, err := listFiles(input)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Println("============================")
-
 	config.LoadDefaultConfig()
 	config.Config.Workers = runtime.NumCPU()
-	probeImg, err := sourceafis.LoadImage(input + "/1.png")
+	probeImg, err := sourceafis.LoadImage("sample-image/1.png")
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -76,15 +96,24 @@ func main() {
 		log.Fatal(err.Error())
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*1)
+	// chaching all template candidate
+	templates := preLoadTempls(files, tc, input)
+
+	// dynamic timout
+	timeout := time.Duration(len(templates)) * time.Millisecond * 500
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	now := time.Now()
 	res := make(chan struct {
 		Name  string
 		Score float64
-	})
+	}, len(templates))
 
-	for _, file := range files {
-		go check(ctx, tc, matcher, input+"/"+file, res)
+	for name, templ := range templates {
+		if name == "i.png" {
+			continue
+		}
+		go check(ctx, matcher, name, templ, res)
 	}
 
 loop:
@@ -107,7 +136,7 @@ loop:
 	fmt.Println("end")
 }
 
-func check(ctx context.Context, tc *sourceafis.TemplateCreator, matcher *sourceafis.Matcher, file string, res chan<- struct {
+func check(ctx context.Context, matcher *sourceafis.Matcher, fileName string, templ *templates.SearchTemplate, res chan<- struct {
 	Name  string
 	Score float64
 },
@@ -116,17 +145,9 @@ func check(ctx context.Context, tc *sourceafis.TemplateCreator, matcher *sourcea
 		Name  string
 		Score float64
 	}
-	img, err := sourceafis.LoadImage(file)
-	if err != nil {
-		return
-	}
 
-	candidate, err := tc.Template(img)
-	if err != nil {
-		return
-	}
-	rr.Name = file
-	rr.Score = matcher.Match(ctx, candidate)
+	rr.Name = fileName
+	rr.Score = matcher.Match(ctx, templ)
 
 	select {
 	case <-ctx.Done():
