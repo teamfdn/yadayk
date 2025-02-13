@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -21,7 +22,6 @@ func (c *TransparencyContents) Accepts(key string) bool {
 }
 
 func (c *TransparencyContents) Accept(key, mime string, data []byte) error {
-	// fmt.Printf("%d B  %s %s \n", len(data), mime, key)
 	return nil
 }
 
@@ -81,10 +81,12 @@ func main() {
 	var input string
 	input = "sample-image"
 
+	filesStart := time.Now()
 	files, err := listFiles(input)
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Println("Raed done: ", time.Since(filesStart))
 
 	config.LoadDefaultConfig()
 	config.Config.Workers = runtime.NumCPU()
@@ -92,30 +94,63 @@ func main() {
 	if err != nil {
 		log.Fatal(err.Error())
 	}
-	l := sourceafis.NewTransparencyLogger(new(TransparencyContents))
-	tc := sourceafis.NewTemplateCreator(l)
-	probe, err := tc.Template(probeImg)
+
+	type kuadred struct {
+		l     *sourceafis.DefaultTransparencyLogger
+		tc    *sourceafis.TemplateCreator
+		probe *templates.SearchTemplate
+	}
+
+	kuad := func(kk chan kuadred) {
+		l := sourceafis.NewTransparencyLogger(new(TransparencyContents))
+		tc := sourceafis.NewTemplateCreator(l)
+		probe, err := tc.Template(probeImg)
+		if err != nil {
+			log.Fatal(err.Error())
+		}
+		kk <- kuadred{
+			l:     l,
+			tc:    tc,
+			probe: probe,
+		}
+	}
+
+	kkchan := make(chan kuadred)
+	ff, _ := context.WithTimeout(context.TODO(), time.Millisecond*1000)
+
+	go kuad(kkchan)
+
+	var kuadreal *kuadred
+
+CHECKIMG:
+	for {
+		select {
+		case <-ff.Done():
+			if errors.Is(ff.Err(), context.DeadlineExceeded) {
+				panic("bobrok")
+			}
+		case kk := <-kkchan:
+			kuadreal = &kk
+			break CHECKIMG
+		}
+	}
+
+	matcher, err := sourceafis.NewMatcher(kuadreal.l, kuadreal.probe)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
 
-	matcher, err := sourceafis.NewMatcher(l, probe)
-	if err != nil {
-		log.Fatal(err.Error())
-	}
-
+	templStart := time.Now()
 	// chaching all template candidate
-	templates := preLoadTempls(files, tc, input)
+	templates := preLoadTempls(files, kuadreal.tc, input)
+	fmt.Println("caching done:", templStart)
 
-	// dynamic timout
-	timeout := time.Duration(len(templates)) * time.Millisecond * 500
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*1000)
 	now := time.Now()
 	res := make(chan struct {
 		Name  string
 		Score float64
-	}, len(templates))
+	})
 
 	for name, templ := range templates {
 		if name == "1.png" {
@@ -133,6 +168,7 @@ loop:
 			break loop
 
 		case rr := <-res:
+			fmt.Printf("score: %#+v \n", rr)
 			if rr.Score >= 50 {
 				fmt.Println("elapsed: ", time.Since(now))
 				fmt.Printf("score: %#+v \n", rr)
