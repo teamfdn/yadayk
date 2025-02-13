@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/jtejido/sourceafis"
@@ -31,20 +32,27 @@ func listFiles(dir string) ([]string, error) {
 	}
 
 	var files []string
+	pool := sync.Pool{New: func() any { return new(string) }}
+
 	for _, entry := range entries {
-		path := entry.Name()
 		if entry.IsDir() {
-			subEntries, err := os.ReadDir(path)
+			entries, err := os.ReadDir(dir + "/" + entry.Name())
 			if err != nil {
-				continue // Skip unreadable directories instead of returning an error
+				return nil, err
 			}
-			for _, subEntry := range subEntries {
-				if !subEntry.IsDir() {
-					files = append(files, path+"/"+subEntry.Name())
+			for _, entry2 := range entries {
+				if !entry2.IsDir() {
+					fileName := pool.Get().(*string)
+					*fileName = entry.Name() + "/" + entry2.Name()
+					files = append(files, *fileName)
+					pool.Put(fileName)
 				}
 			}
 		} else {
-			files = append(files, path)
+			fileName := pool.Get().(*string)
+			*fileName = entry.Name()
+			files = append(files, *fileName)
+			pool.Put(fileName)
 		}
 	}
 
@@ -110,7 +118,7 @@ func main() {
 	}, len(templates))
 
 	for name, templ := range templates {
-		if name == "i.png" {
+		if name == "1.png" {
 			continue
 		}
 		go check(ctx, matcher, name, templ, res)
